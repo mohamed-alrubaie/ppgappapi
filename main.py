@@ -172,15 +172,15 @@ def extract_features(segment, systolic_peaks, diastolic_peaks, fs=125):
 @app.post("/predict")
 def predict(data: SensorData):
     try:
-        print("\n--- Incoming PPG Signal ---")
-        print(f"Signal Length: {len(data.sensor_signal)}")
-        print(f"Signal Preview: {data.sensor_signal[:20]}")
-        print(f"Sampling Rate: {data.fs_sensor} Hz")
+        # 0. Echo back the raw input
+        raw_signal = data.sensor_signal
+        fs_orig    = data.fs_sensor
+
         # 1. Normalize raw signal to the training range
-        normalized = normalize_to_range(data.sensor_signal, lower=-1.5, upper=2.0)
+        normalized = normalize_to_range(raw_signal, lower=-1.5, upper=2.0)
 
         # 2. Resample from original sensor rate to 125 Hz
-        resampled = resample_signal(normalized, fs_orig=data.fs_sensor, fs_target=125)
+        resampled = resample_signal(normalized, fs_orig=fs_orig, fs_target=125)
 
         # 3. Segment into 7‑second windows (padding the last if needed)
         segments = segment_samples(resampled, fs=125)
@@ -213,12 +213,14 @@ def predict(data: SensorData):
             sbp_preds.append(float(output[0]))
             dbp_preds.append(float(output[1]))
 
-        # 7. Return the predictions
-        print("--- Prediction Completed ---")
-        print(f"SBP Predictions: {sbp_preds}")
-        print(f"DBP Predictions: {dbp_preds}")
+        # 7. Return the raw input plus the predictions
+        return {
+            "raw_signal_length": len(raw_signal),
+            "fs_sensor": fs_orig,
+            "num_segments": len(segments),
+            "SBP": sbp_preds,
+            "DBP": dbp_preds
+        }
 
-        return {"SBP": sbp_preds, "DBP": dbp_preds}
-    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
