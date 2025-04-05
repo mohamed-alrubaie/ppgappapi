@@ -1,0 +1,5 @@
+import pickle
+# after training:
+with open('scaler.pkl','wb') as f: pickle.dump(scaler, f)
+with open('sbp_scaler.pkl','wb') as f: pickle.dump(sbp_scaler, f)
+with open('dbp_scaler.pkl','wb') as f: pickle.dump(dbp_scaler, f)
