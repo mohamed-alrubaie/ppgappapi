@@ -9,14 +9,13 @@ from scipy.signal import find_peaks
 from scipy.fft import fft
 import tensorflow as tf
 
-# ---- FastAPI setup ----
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse
 
 app = FastAPI()
 
-# ---- Web UI for manual testing ----
-
 @app.get("/", response_class=HTMLResponse)
-def home():
+async def form_get():
     return """
     <html>
       <head>
