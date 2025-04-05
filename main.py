@@ -172,6 +172,10 @@ def extract_features(segment, systolic_peaks, diastolic_peaks, fs=125):
 @app.post("/predict")
 def predict(data: SensorData):
     try:
+        print("\n--- Incoming PPG Signal ---")
+        print(f"Signal Length: {len(data.sensor_signal)}")
+        print(f"Signal Preview: {data.sensor_signal[:20]}")
+        print(f"Sampling Rate: {data.fs_sensor} Hz")
         # 1. Normalize raw signal to the training range
         normalized = normalize_to_range(data.sensor_signal, lower=-1.5, upper=2.0)
 
@@ -210,7 +214,11 @@ def predict(data: SensorData):
             dbp_preds.append(float(output[1]))
 
         # 7. Return the predictions
-        return {"SBP": sbp_preds, "DBP": dbp_preds}
+        print("--- Prediction Completed ---")
+        print(f"SBP Predictions: {sbp_preds}")
+        print(f"DBP Predictions: {dbp_preds}")
 
+        return {"SBP": sbp_preds, "DBP": dbp_preds}
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
