@@ -181,7 +181,7 @@ async def predict(ppg_sample: str = Form(...), fs_sensor: float = Form(...)):
         normalized = normalize_to_range(raw_signal, lower=-1.5, upper=2.0)
 
         # 2. Resample from original sensor rate to 125 Hz
-        resampled = resample_signal(normalized, fs_orig=fs_orig, fs_target=125)
+        resampled = resample_signal(normalized, fs_orig=fs_sensor, fs_target=125)
 
         # 3. Segment into 7‑second windows (padding the last if needed)
         segments = segment_samples(resampled, fs=125)
@@ -214,6 +214,10 @@ async def predict(ppg_sample: str = Form(...), fs_sensor: float = Form(...)):
             sbp_preds.append(float(output[0]))
             dbp_preds.append(float(output[1]))
 
+        # For simplicity, show only the first segment’s prediction:
+        sbp = sbp_preds[0]
+        dbp = dbp_preds[0]
+
         return f"""
         <html>
             <body>
@@ -227,4 +231,3 @@ async def predict(ppg_sample: str = Form(...), fs_sensor: float = Form(...)):
 
     except Exception as e:
         return HTMLResponse(f"<h3>Error:</h3><pre>{str(e)}</pre>")
-
