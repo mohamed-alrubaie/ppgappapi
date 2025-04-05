@@ -1,15 +1,17 @@
-# app.py
+# At the top of app.py
+
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import numpy as np
 from scipy import signal
 from scipy.signal import find_peaks
 from scipy.fft import fft
 import tensorflow as tf
-# ---- Load TFLite model at startup ----
-# app.py (add this below your imports, before the existing @app.post)
 
-from fastapi.responses import HTMLResponse
+# ---- FastAPI setup ----
+
+app = FastAPI()
 
 # ---- Web UI for manual testing ----
 
@@ -55,6 +57,9 @@ def home():
       </body>
     </html>
     """
+
+# ---- Your existing SensorData, helper functions, and @app.post("/predict") go here ----
+
 
 # ---- existing @app.post("/predict") stays unchanged ----
 
