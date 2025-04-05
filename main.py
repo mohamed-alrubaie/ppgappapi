@@ -7,6 +7,56 @@ from scipy.signal import find_peaks
 from scipy.fft import fft
 import tensorflow as tf
 # ---- Load TFLite model at startup ----
+# app.py (add this below your imports, before the existing @app.post)
+
+from fastapi.responses import HTMLResponse
+
+# ---- Web UI for manual testing ----
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return """
+    <html>
+      <head>
+        <title>PPG BP Predictor</title>
+        <style>
+          body { font-family: sans-serif; margin: 2rem; }
+          textarea { width: 100%; height: 200px; }
+          input, button { font-size: 1rem; padding: .5rem; }
+        </style>
+      </head>
+      <body>
+        <h1>PPG Blood Pressure Predictor</h1>
+        <p>Paste your PPG samples (one number per line) and enter the original sampling rate.</p>
+        <textarea id="signal"></textarea><br/>
+        <label>Sampling rate (Hz): <input id="fs" type="number" value="100"/></label><br/><br/>
+        <button onclick="runPredict()">Run Prediction</button>
+        <h2>Result</h2>
+        <pre id="result"></pre>
+
+        <script>
+          async function runPredict() {
+            const raw = document.getElementById("signal").value
+              .split(/\\r?\\n/)
+              .map(s => parseFloat(s))
+              .filter(n => !isNaN(n));
+            const fs = parseFloat(document.getElementById("fs").value) || 125;
+            const resp = await fetch("/predict", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ sensor_signal: raw, fs_sensor: fs })
+            });
+            const json = await resp.json();
+            document.getElementById("result").textContent =
+              resp.ok ? JSON.stringify(json, null, 2)
+                      : `Error ${resp.status}: ${json.detail}`;
+          }
+        </script>
+      </body>
+    </html>
+    """
+
+# ---- existing @app.post("/predict") stays unchanged ----
 
 interpreter = tf.lite.Interpreter(model_path="optimized_cnn_lstm_model.tflite")
 interpreter.allocate_tensors()
