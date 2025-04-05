@@ -3,7 +3,13 @@ from fastapi.responses import HTMLResponse
 import numpy as np
 import tensorflow as tf
 from scipy import signal
-
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import numpy as np
+from scipy import signal
+from scipy.signal import find_peaks
+from scipy.fft import fft
+import tensorflow as tf
 app = FastAPI()
 
 # Load TFLite model
