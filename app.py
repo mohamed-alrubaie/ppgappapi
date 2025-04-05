@@ -195,7 +195,7 @@ async def predict(ppg_sample: str = Form(...), fs_sensor: float = Form(...)):
 
         # 4. Extract features for each segment
         feature_list = []
-          for seg in segments:
+        for seg in segments:
             sys_peaks, dia_peaks, notches = detect_peaks_custom(seg, fs=125)
             feats = extract_features(seg, sys_peaks, dia_peaks, notches, fs=125)
             feature_list.append(feats)
