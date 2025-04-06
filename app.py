@@ -17,15 +17,20 @@ interpreter = tf.lite.Interpreter(model_path="optimized_cnn_lstm_model.tflite")
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()[0]
 output_details = interpreter.get_output_details()[0]
-import pickle
+# Known scaler parameters
+SBP_MIN   = 55.0
+SBP_RANGE = 144.0  # 199 - 55
 
-# … after loading TFLite interpreter …
+DBP_MIN   = 40.0
+DBP_RANGE = 78.0   # 118 - 40
 
-# Load your saved SBP and DBP scalers
-with open("sbp_scaler.pkl", "rb") as f:
-    sbp_scaler = pickle.load(f)
-with open("dbp_scaler.pkl", "rb") as f:
-    dbp_scaler = pickle.load(f)
+def inverse_sbp(scaled_vals):
+    # scaled_vals: array‑like of floats in [0,1]
+    return [v * SBP_RANGE + SBP_MIN for v in scaled_vals]
+
+def inverse_dbp(scaled_vals):
+    return [v * DBP_RANGE + DBP_MIN for v in scaled_vals]
+
 
 # --- Homepage with Form ---
 @app.get("/", response_class=HTMLResponse)
@@ -225,10 +230,8 @@ async def predict(ppg_sample: str = Form(...), fs_sensor: float = Form(...)):
             dbp_preds.append(out[1])
 
         # 5. Reverse scaling
-        sbp_array = np.array(sbp_preds).reshape(-1,1)
-        dbp_array = np.array(dbp_preds).reshape(-1,1)
-        sbp_orig  = sbp_scaler.inverse_transform(sbp_array).flatten()
-        dbp_orig  = dbp_scaler.inverse_transform(dbp_array).flatten()
+        sbp_orig = inverse_sbp(sbp_preds)
+        dbp_orig = inverse_dbp(dbp_preds)
 
         # 6. Display first segment’s BP
         sbp = sbp_orig[0]
