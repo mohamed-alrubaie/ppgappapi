@@ -17,6 +17,15 @@ interpreter = tf.lite.Interpreter(model_path="optimized_cnn_lstm_model.tflite")
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()[0]
 output_details = interpreter.get_output_details()[0]
+import pickle
+
+# … after loading TFLite interpreter …
+
+# Load your saved SBP and DBP scalers
+with open("sbp_scaler.pkl", "rb") as f:
+    sbp_scaler = pickle.load(f)
+with open("dbp_scaler.pkl", "rb") as f:
+    dbp_scaler = pickle.load(f)
 
 # --- Homepage with Form ---
 @app.get("/", response_class=HTMLResponse)
@@ -179,63 +188,59 @@ def extract_features(segment, systolic_peaks, diastolic_peaks, dicrotic_notches,
     
     return np.array(features, dtype=np.float32)
 
-# --- Prediction Endpoint (POST from Form) ---
 @app.post("/predict", response_class=HTMLResponse)
 async def predict(ppg_sample: str = Form(...), fs_sensor: float = Form(...)):
     try:
-        # Parse input string to list of floats
         raw_signal = [float(x) for x in ppg_sample.strip().split(",") if x.strip()]
 
-        # 1. Normalize raw signal to the training range
-        normalized = normalize_to_range(raw_signal, lower=-1.5, upper=2.0)
-
-        # 2. Resample from original sensor rate to 125 Hz
+        # 1. Normalize and resample as before…
+        normalized = normalize_to_range(raw_signal, -1.5, 2.0)
         resampled = resample_signal(normalized, fs_orig=fs_sensor, fs_target=125)
+        segments  = segment_samples(resampled, fs=125)
 
-        # 3. Segment into 7‑second windows (padding the last if needed)
-        segments = segment_samples(resampled, fs=125)
-
-        # 4. Extract features for each segment
+        # 2. Feature extraction…
         feature_list = []
         for seg in segments:
-            sys_peaks, dia_peaks, notches = detect_peaks_custom(seg, fs=125)
-            feats = extract_features(seg, sys_peaks, dia_peaks, notches, fs=125)
-            feature_list.append(feats)
-        feat_matrix = np.vstack(feature_list)  # shape: (n_segments, n_features)
+            sys_p, dia_p, notches = detect_peaks_custom(seg, fs=125)
+            feature_list.append(extract_features(seg, sys_p, dia_p, notches, fs=125))
+        feat_matrix = np.vstack(feature_list)
 
-        # 5. Pad feature dimension so it's divisible by time_steps, then reshape
+        # 3. Pad & reshape for model…
         time_steps = 2
-        n_feats = feat_matrix.shape[1]
+        n_feats    = feat_matrix.shape[1]
         if n_feats % time_steps:
             pad = time_steps - (n_feats % time_steps)
-            feat_matrix = np.pad(feat_matrix, ((0, 0), (0, pad)), 'constant')
+            feat_matrix = np.pad(feat_matrix, ((0,0),(0,pad)), 'constant')
             n_feats += pad
-        features_per_step = n_feats // time_steps
-        model_input = feat_matrix.reshape(-1, time_steps, features_per_step).astype(np.float32)
+        fps         = n_feats // time_steps
+        model_input = feat_matrix.reshape(-1, time_steps, fps).astype(np.float32)
 
-        # 6. Run inference on each time‑windowed sample
-        sbp_preds = []
-        dbp_preds = []
+        # 4. Run inference
+        sbp_preds, dbp_preds = [], []
         for sample in model_input:
             interpreter.set_tensor(input_details['index'], [sample])
             interpreter.invoke()
-            output = interpreter.get_tensor(output_details['index'])[0]
-            sbp_preds.append(float(output[0]))
-            dbp_preds.append(float(output[1]))
+            out = interpreter.get_tensor(output_details['index'])[0]
+            sbp_preds.append(out[0])
+            dbp_preds.append(out[1])
 
-        # For simplicity, show only the first segment’s prediction:
-        sbp = sbp_preds[0]
-        dbp = dbp_preds[0]
+        # 5. Reverse scaling
+        sbp_array = np.array(sbp_preds).reshape(-1,1)
+        dbp_array = np.array(dbp_preds).reshape(-1,1)
+        sbp_orig  = sbp_scaler.inverse_transform(sbp_array).flatten()
+        dbp_orig  = dbp_scaler.inverse_transform(dbp_array).flatten()
+
+        # 6. Display first segment’s BP
+        sbp = sbp_orig[0]
+        dbp = dbp_orig[0]
 
         return f"""
-        <html>
-            <body>
-                <h2>Prediction Result</h2>
-                <p><strong>SBP:</strong> {sbp:.2f} mmHg</p>
-                <p><strong>DBP:</strong> {dbp:.2f} mmHg</p>
-                <br><a href="/">Try another sample</a>
-            </body>
-        </html>
+        <html><body>
+          <h2>Prediction Result</h2>
+          <p><strong>SBP:</strong> {sbp:.2f} mmHg</p>
+          <p><strong>DBP:</strong> {dbp:.2f} mmHg</p>
+          <br><a href="/">Try another sample</a>
+        </body></html>
         """
 
     except Exception as e:
