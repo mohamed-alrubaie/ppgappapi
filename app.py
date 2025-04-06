@@ -52,6 +52,7 @@ def segment_samples(ppg, fs=125):
             seg = np.pad(seg, (0, length - len(seg)), 'constant')
         segments.append(seg)
     return segments
+
 def dicrotic_notch(beat, systolic):
     derivative = np.diff(np.diff(beat[systolic:]))  # Compute second derivative
     point = find_peaks(derivative)[0]                # Locate peaks in the derivative
@@ -75,11 +76,11 @@ def detect_peaks_custom(ppg_signal, fs=125):
     dicrotic_notches = []
     for i in range(1, len(systolic_peaks)):
         start_idx = systolic_peaks[i-1]
-        end_idx   = diastolic_peaks[i-1] if i-1 < len(diastolic_peaks) else len(ppg_signal)
+        end_idx   = diastolic_peaks[i-1] if (i-1) < len(diastolic_peaks) else len(ppg_signal)
         segment   = ppg_signal[start_idx:end_idx]
         if len(segment) > 10:
             notch = dicrotic_notch(segment, 0)
-            if notch:
+            if notch != 0:
                 dicrotic_notches.append(start_idx + notch)
     
     return systolic_peaks, diastolic_peaks, dicrotic_notches
@@ -90,8 +91,8 @@ def segment_samples(ppg_signal, fs=125):
     segments      = []
     
     for i in range(num_samples):
-        start   = i * sample_length
-        end     = start + sample_length
+        start = i * sample_length
+        end   = start + sample_length
         segments.append(ppg_signal[start:end])
     
     return segments
@@ -114,32 +115,32 @@ def extract_features(segment, systolic_peaks, diastolic_peaks, dicrotic_notches,
         for idx in systolic_peaks:
             if idx > 0:
                 rise.append((segment[idx] - segment[idx-1]) / (1/fs))
-        features.append(np.mean(rise) if rise else 0)
+        features.append(np.mean(rise) if len(rise) > 0 else 0)
         # Falling slope
         fall = []
         for j in range(len(systolic_peaks)-1):
             curr, nxt = systolic_peaks[j], systolic_peaks[j+1]
             fall.append((segment[curr] - segment[nxt]) / ((nxt-curr)/fs))
-        features.append(np.mean(fall) if fall else 0)
+        features.append(np.mean(fall) if len(fall) > 0 else 0)
     else:
         features.extend([0, 0])
     
     # Downstroke & upstroke times
-    if diastolic_peaks and dicrotic_notches:
+    if len(diastolic_peaks) > 0 and len(dicrotic_notches) > 0:
         features.append((diastolic_peaks[0] - dicrotic_notches[0]) / fs)
-        features.append((dicrotic_notches[0] - systolic_peaks[0]) / fs if systolic_peaks else 0)
+        features.append((dicrotic_notches[0] - systolic_peaks[0]) / fs if len(systolic_peaks) > 0 else 0)
     else:
         features.extend([0, 0])
     
     # Percentile areas between peaks
     percentiles = [10, 25, 33, 50, 66, 75, 100]
     for p in percentiles:
-        if systolic_peaks and diastolic_peaks:
+        if len(systolic_peaks) > 0 and len(diastolic_peaks) > 0:
             s, d = systolic_peaks[0], diastolic_peaks[0]
             features.append(np.percentile(segment[s:d], p))
         else:
             features.append(0)
-        if diastolic_peaks and len(systolic_peaks)>1:
+        if len(diastolic_peaks) > 0 and len(systolic_peaks) > 1:
             d, s2 = diastolic_peaks[0], systolic_peaks[1]
             features.append(np.percentile(segment[d:s2], p))
         else:
@@ -155,28 +156,29 @@ def extract_features(segment, systolic_peaks, diastolic_peaks, dicrotic_notches,
     fft_vals = np.abs(fft(segment))
     dom = np.argmax(fft_vals[1:]) + 1
     features.append(freqs[dom])
-    half_max = fft_vals.max()/2
-    bw = freqs[np.where(fft_vals>=half_max)]
-    features.append((bw.max()-bw.min()) if len(bw) else 0)
+    half_max = fft_vals.max() / 2
+    bw = freqs[np.where(fft_vals >= half_max)]
+    features.append((bw.max() - bw.min()) if len(bw) > 0 else 0)
     
     # Beat symmetry
-    if systolic_peaks and diastolic_peaks:
+    if len(systolic_peaks) > 0 and len(diastolic_peaks) > 0:
         asc = diastolic_peaks[0] - systolic_peaks[0]
-        desc = (systolic_peaks[1] - diastolic_peaks[0]) if len(systolic_peaks)>1 else 0
-        features.append(asc/(desc+1e-6))
+        desc = (systolic_peaks[1] - diastolic_peaks[0]) if len(systolic_peaks) > 1 else 0
+        features.append(asc / (desc + 1e-6))
     else:
         features.append(0)
     
     # Hysteresis, derivative, curvature, lag
     features.append(np.trapz(np.abs(np.diff(segment))))
     features.append(np.mean(np.abs(np.diff(segment))))
-    features.append(np.sum(np.abs(np.diff(np.diff(segment))))/N)
-    if len(systolic_peaks)>1:
+    features.append(np.sum(np.abs(np.diff(np.diff(segment)))) / N)
+    if len(systolic_peaks) > 1:
         features.append(np.mean(np.diff(systolic_peaks)))
     else:
         features.append(0)
     
     return np.array(features, dtype=np.float32)
+
 # --- Prediction Endpoint (POST from Form) ---
 @app.post("/predict", response_class=HTMLResponse)
 async def predict(ppg_sample: str = Form(...), fs_sensor: float = Form(...)):
