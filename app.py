@@ -1,8 +1,5 @@
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse
-import numpy as np
-import tensorflow as tf
-from scipy import signal
+# app.py
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import numpy as np
@@ -10,55 +7,40 @@ from scipy import signal
 from scipy.signal import find_peaks
 from scipy.fft import fft
 import tensorflow as tf
+
 app = FastAPI()
 
-# Load TFLite model
+# --- Load TFLite model ---
 interpreter = tf.lite.Interpreter(model_path="optimized_cnn_lstm_model.tflite")
 interpreter.allocate_tensors()
-input_details = interpreter.get_input_details()[0]
+input_details  = interpreter.get_input_details()[0]
 output_details = interpreter.get_output_details()[0]
-# Known scaler parameters
-SBP_MIN   = 55.0
-SBP_RANGE = 144.0  # 199 - 55
 
-DBP_MIN   = 40.0
-DBP_RANGE = 78.0   # 118 - 40
+# --- Known MinMax scaler parameters ---
+SBP_MIN, SBP_RANGE = 55.0, 144.0   # 199 - 55
+DBP_MIN, DBP_RANGE = 40.0, 78.0    # 118 - 40
 
 def inverse_sbp(scaled_vals):
-    # scaled_vals: array‑like of floats in [0,1]
     return [v * SBP_RANGE + SBP_MIN for v in scaled_vals]
 
 def inverse_dbp(scaled_vals):
     return [v * DBP_RANGE + DBP_MIN for v in scaled_vals]
 
+# --- Request schema ---
+class SensorData(BaseModel):
+    sensor_signal: list[float]
 
-# --- Homepage with Form ---
-@app.get("/", response_class=HTMLResponse)
-async def form_get():
-    return """
-    <html>
-        <head><title>PPG Blood Pressure Predictor</title></head>
-        <body>
-            <h2>Enter PPG Input Sample</h2>
-            <form action="/predict" method="post">
-                <textarea name="ppg_sample" rows="20" cols="100"></textarea><br><br>
-                <input type="text" name="fs_sensor" value="125" placeholder="Sampling rate (Hz)"><br><br>
-                <input type="submit" value="Predict">
-            </form>
-        </body>
-    </html>
-    """
+# --- Helper functions ---
 def normalize_to_range(x, lower=-1.5, upper=2.0):
     x = np.array(x, dtype=float)
-    x_min, x_max = x.min(), x.max()
-    return lower + (x - x_min) * (upper - lower) / (x_max - x_min)
+    return lower + (x - x.min()) * (upper - lower) / (x.max() - x.min())
 
-def resample_signal(x, fs_orig, fs_target=125):
-    num_samples = int(len(x) * fs_target / fs_orig)
-    return signal.resample(x, num_samples)
+def resample_signal(x, fs_orig=25, fs_target=125):
+    n = int(len(x) * fs_target / fs_orig)
+    return signal.resample(x, n)
 
 def segment_samples(ppg, fs=125):
-    length = int(fs * 7)  # 7‑second windows
+    length = fs * 7
     segments = []
     for start in range(0, len(ppg), length):
         seg = ppg[start:start+length]
@@ -68,183 +50,118 @@ def segment_samples(ppg, fs=125):
     return segments
 
 def dicrotic_notch(beat, systolic):
-    derivative = np.diff(np.diff(beat[systolic:]))  # Compute second derivative
-    point = find_peaks(derivative)[0]                # Locate peaks in the derivative
-    corrected = 0
-    if len(point) > 0:
-        corrected = systolic + point[-1]             # Adjust position back to original beat
-    return corrected
+    deriv2 = np.diff(np.diff(beat[systolic:]))
+    peaks, _ = find_peaks(deriv2)
+    return systolic + peaks[-1] if len(peaks) > 0 else systolic
 
-def detect_peaks_custom(ppg_signal, fs=125):
-    # 1. Systolic peaks
-    systolic_peaks, _ = find_peaks(ppg_signal, distance=fs/2.5)
-    
-    # 2. Diastolic peaks: the minima between successive systolic peaks
-    diastolic_peaks = []
-    for i in range(1, len(systolic_peaks)):
-        seg = ppg_signal[systolic_peaks[i-1]:systolic_peaks[i]]
-        diastolic_peak = np.argmin(seg) + systolic_peaks[i-1]
-        diastolic_peaks.append(diastolic_peak)
-    
-    # 3. Dicrotic notches: second-derivative peaks after each systolic
-    dicrotic_notches = []
-    for i in range(1, len(systolic_peaks)):
-        start_idx = systolic_peaks[i-1]
-        end_idx   = diastolic_peaks[i-1] if (i-1) < len(diastolic_peaks) else len(ppg_signal)
-        segment   = ppg_signal[start_idx:end_idx]
-        if len(segment) > 10:
-            notch = dicrotic_notch(segment, 0)
-            if notch != 0:
-                dicrotic_notches.append(start_idx + notch)
-    
-    return systolic_peaks, diastolic_peaks, dicrotic_notches
+def detect_peaks_custom(ppg, fs=125):
+    sys_p, _ = find_peaks(ppg, distance=fs/2.5)
+    dia_p = [
+        np.argmin(ppg[sys_p[i-1]:sys_p[i]]) + sys_p[i-1]
+        for i in range(1, len(sys_p))
+    ]
+    notches = []
+    for i in range(1, len(sys_p)):
+        s, e = sys_p[i-1], dia_p[i-1] if i-1 < len(dia_p) else len(ppg)
+        notch = dicrotic_notch(ppg[s:e], 0)
+        if notch:
+            notches.append(s + notch)
+    return sys_p, dia_p, notches
 
-def segment_samples(ppg_signal, fs=125):
-    sample_length = fs * 7  # 7‑second windows
-    num_samples   = len(ppg_signal) // sample_length
-    segments      = []
-    
-    for i in range(num_samples):
-        start = i * sample_length
-        end   = start + sample_length
-        segments.append(ppg_signal[start:end])
-    
-    return segments
-
-def extract_features(segment, systolic_peaks, diastolic_peaks, dicrotic_notches, fs=125):
-    features = []
-    
-    # Peak‑to‑peak intervals & heart rate
-    if len(systolic_peaks) > 1:
-        intervals = np.diff(systolic_peaks) / fs
-        features.append(np.mean(intervals))
-        features.append(60 / np.mean(intervals))
+def extract_features(seg, sys_p, dia_p, notches, fs=125):
+    feats = []
+    # 1. Peak-to-peak & HR
+    if len(sys_p) > 1:
+        iv = np.diff(sys_p)/fs
+        feats += [iv.mean(), 60/iv.mean()]
     else:
-        features.extend([0, 0])
-    
-    # Blood‑flow acceleration & deceleration
-    if len(systolic_peaks) > 0:
-        # Rising slope
-        rise = []
-        for idx in systolic_peaks:
-            if idx > 0:
-                rise.append((segment[idx] - segment[idx-1]) / (1/fs))
-        features.append(np.mean(rise) if len(rise) > 0 else 0)
-        # Falling slope
-        fall = []
-        for j in range(len(systolic_peaks)-1):
-            curr, nxt = systolic_peaks[j], systolic_peaks[j+1]
-            fall.append((segment[curr] - segment[nxt]) / ((nxt-curr)/fs))
-        features.append(np.mean(fall) if len(fall) > 0 else 0)
+        feats += [0,0]
+    # 2. Slopes
+    if len(sys_p)>0:
+        rise = [(seg[i]-seg[i-1])/(1/fs) for i in sys_p if i>0]
+        feats.append(np.mean(rise) if len(rise)>0 else 0)
+        fall = [
+            (seg[sys_p[j]]-seg[sys_p[j+1]])/((sys_p[j+1]-sys_p[j])/fs)
+            for j in range(len(sys_p)-1)
+        ]
+        feats.append(np.mean(fall) if len(fall)>0 else 0)
     else:
-        features.extend([0, 0])
-    
-    # Downstroke & upstroke times
-    if len(diastolic_peaks) > 0 and len(dicrotic_notches) > 0:
-        features.append((diastolic_peaks[0] - dicrotic_notches[0]) / fs)
-        features.append((dicrotic_notches[0] - systolic_peaks[0]) / fs if len(systolic_peaks) > 0 else 0)
+        feats += [0,0]
+    # 3. Down/upstroke
+    if len(dia_p)>0 and len(notches)>0:
+        feats += [(dia_p[0]-notches[0])/fs,
+                  (notches[0]-sys_p[0])/fs if len(sys_p)>0 else 0]
     else:
-        features.extend([0, 0])
-    
-    # Percentile areas between peaks
-    percentiles = [10, 25, 33, 50, 66, 75, 100]
-    for p in percentiles:
-        if len(systolic_peaks) > 0 and len(diastolic_peaks) > 0:
-            s, d = systolic_peaks[0], diastolic_peaks[0]
-            features.append(np.percentile(segment[s:d], p))
+        feats += [0,0]
+    # 4. Percentiles
+    for p in [10,25,33,50,66,75,100]:
+        if len(sys_p)>0 and len(dia_p)>0:
+            feats.append(np.percentile(seg[sys_p[0]:dia_p[0]], p))
         else:
-            features.append(0)
-        if len(diastolic_peaks) > 0 and len(systolic_peaks) > 1:
-            d, s2 = diastolic_peaks[0], systolic_peaks[1]
-            features.append(np.percentile(segment[d:s2], p))
+            feats.append(0)
+        if len(dia_p)>0 and len(sys_p)>1:
+            feats.append(np.percentile(seg[dia_p[0]:sys_p[1]], p))
         else:
-            features.append(0)
-    
-    # Amplitude stats
-    features.append(np.max(segment))
-    features.append(np.min(segment))
-    
-    # Frequency‑domain: dominant freq & bandwidth
-    N = len(segment)
-    freqs = np.fft.fftfreq(N, 1/fs)
-    fft_vals = np.abs(fft(segment))
-    dom = np.argmax(fft_vals[1:]) + 1
-    features.append(freqs[dom])
-    half_max = fft_vals.max() / 2
-    bw = freqs[np.where(fft_vals >= half_max)]
-    features.append((bw.max() - bw.min()) if len(bw) > 0 else 0)
-    
-    # Beat symmetry
-    if len(systolic_peaks) > 0 and len(diastolic_peaks) > 0:
-        asc = diastolic_peaks[0] - systolic_peaks[0]
-        desc = (systolic_peaks[1] - diastolic_peaks[0]) if len(systolic_peaks) > 1 else 0
-        features.append(asc / (desc + 1e-6))
+            feats.append(0)
+    # 5. Amplitude
+    feats += [seg.max(), seg.min()]
+    # 6. Frequency
+    N = len(seg)
+    freqs = np.fft.fftfreq(N,1/fs)
+    fv    = np.abs(fft(seg))
+    dom   = np.argmax(fv[1:])+1
+    feats.append(freqs[dom])
+    half  = fv.max()/2
+    bw    = freqs[fv>=half]
+    feats.append((bw.max()-bw.min()) if len(bw)>0 else 0)
+    # 7. Symmetry
+    if len(sys_p)>0 and len(dia_p)>0:
+        asc  = dia_p[0]-sys_p[0]
+        desc = (sys_p[1]-dia_p[0]) if len(sys_p)>1 else 0
+        feats.append(asc/(desc+1e-6))
     else:
-        features.append(0)
-    
-    # Hysteresis, derivative, curvature, lag
-    features.append(np.trapz(np.abs(np.diff(segment))))
-    features.append(np.mean(np.abs(np.diff(segment))))
-    features.append(np.sum(np.abs(np.diff(np.diff(segment)))) / N)
-    if len(systolic_peaks) > 1:
-        features.append(np.mean(np.diff(systolic_peaks)))
-    else:
-        features.append(0)
-    
-    return np.array(features, dtype=np.float32)
+        feats.append(0)
+    # 8. Hysteresis, deriv, curvature, lag
+    feats.append(np.trapz(np.abs(np.diff(seg))))
+    feats.append(np.mean(np.abs(np.diff(seg))))
+    feats.append(np.sum(np.abs(np.diff(np.diff(seg))))/N)
+    feats.append(np.mean(np.diff(sys_p)) if len(sys_p)>1 else 0)
+    return np.array(feats, dtype=np.float32)
 
-@app.post("/predict", response_class=HTMLResponse)
-async def predict(ppg_sample: str = Form(...), fs_sensor: float = Form(...)):
+# --- JSON Prediction Endpoint ---
+@app.post("/predict")
+async def predict(data: SensorData):
     try:
-        raw_signal = [float(x) for x in ppg_sample.strip().split(",") if x.strip()]
-
-        # 1. Normalize and resample as before…
-        normalized = normalize_to_range(raw_signal, -1.5, 2.0)
-        resampled = resample_signal(normalized, fs_orig=fs_sensor, fs_target=125)
-        segments  = segment_samples(resampled, fs=125)
-
-        # 2. Feature extraction…
-        feature_list = []
-        for seg in segments:
-            sys_p, dia_p, notches = detect_peaks_custom(seg, fs=125)
-            feature_list.append(extract_features(seg, sys_p, dia_p, notches, fs=125))
-        feat_matrix = np.vstack(feature_list)
-
-        # 3. Pad & reshape for model…
-        time_steps = 2
-        n_feats    = feat_matrix.shape[1]
-        if n_feats % time_steps:
-            pad = time_steps - (n_feats % time_steps)
-            feat_matrix = np.pad(feat_matrix, ((0,0),(0,pad)), 'constant')
-            n_feats += pad
-        fps         = n_feats // time_steps
-        model_input = feat_matrix.reshape(-1, time_steps, fps).astype(np.float32)
-
-        # 4. Run inference
-        sbp_preds, dbp_preds = [], []
-        for sample in model_input:
-            interpreter.set_tensor(input_details['index'], [sample])
+        # 1. Normalize (original fs assumed 25 Hz)
+        normed    = normalize_to_range(data.sensor_signal)
+        # 2. Resample to 125 Hz
+        resampled = resample_signal(normed, fs_orig=25, fs_target=125)
+        # 3. Segment into 7 s windows
+        segments  = segment_samples(resampled)
+        # 4. Feature matrix
+        feats = np.vstack([
+            extract_features(seg, *detect_peaks_custom(seg), fs=125)
+            for seg in segments
+        ])
+        # 5. Pad & reshape for CNN‑LSTM
+        ts = 2; nf = feats.shape[1]
+        if nf % ts:
+            p = ts - (nf % ts)
+            feats = np.pad(feats, ((0,0),(0,p)), 'constant')
+            nf += p
+        fps = nf // ts
+        inp = feats.reshape(-1, ts, fps).astype(np.float32)
+        # 6. Inference
+        sbp_scaled, dbp_scaled = [], []
+        for s in inp:
+            interpreter.set_tensor(input_details['index'], [s])
             interpreter.invoke()
-            out = interpreter.get_tensor(output_details['index'])[0]
-            sbp_preds.append(out[0])
-            dbp_preds.append(out[1])
-
-        # 5. Reverse scaling
-        sbp_orig = inverse_sbp(sbp_preds)
-        dbp_orig = inverse_dbp(dbp_preds)
-
-        # 6. Display first segment’s BP
-        sbp = sbp_orig[0]
-        dbp = dbp_orig[0]
-
-        return f"""
-        <html><body>
-          <h2>Prediction Result</h2>
-          <p><strong>SBP:</strong> {sbp:.2f} mmHg</p>
-          <p><strong>DBP:</strong> {dbp:.2f} mmHg</p>
-          <br><a href="/">Try another sample</a>
-        </body></html>
-        """
+            o = interpreter.get_tensor(output_details['index'])[0]
+            sbp_scaled.append(o[0]); dbp_scaled.append(o[1])
+        # 7. Inverse scale
+        sbp = inverse_sbp(sbp_scaled)
+        dbp = inverse_dbp(dbp_scaled)
+        return {"SBP": sbp, "DBP": dbp}
 
     except Exception as e:
-        return HTMLResponse(f"<h3>Error:</h3><pre>{str(e)}</pre>")
+        raise HTTPException(status_code=500, detail=str(e))
