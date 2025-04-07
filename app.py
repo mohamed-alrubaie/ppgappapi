@@ -128,39 +128,43 @@ def extract_features(seg, sys_p, dia_p, notches, fs=125):
     feats.append(np.mean(np.diff(sys_p)) if len(sys_p)>1 else 0)
     return np.array(feats, dtype=np.float32)
 
-# --- JSON Prediction Endpoint ---
 @app.post("/predict")
 async def predict(data: SensorData):
     try:
-        # 1. Normalize (original fs assumed 25 Hz)
+        # 1. Normalize (assuming original fs=25 Hz)
         normed    = normalize_to_range(data.sensor_signal)
-        # 2. Resample to 125 Hz
+        # 2. Resample to 125 Hz
         resampled = resample_signal(normed, fs_orig=25, fs_target=125)
-        # 3. Segment into 7 s windows
+        # 3. Segment into 7s windows
         segments  = segment_samples(resampled)
-        # 4. Feature matrix
-        feats = np.vstack([
-            extract_features(seg, *detect_peaks_custom(seg), fs=125)
-            for seg in segments
-        ])
-        # 5. Pad & reshape for CNN‑LSTM
-        ts = 2; nf = feats.shape[1]
+        # 4. Build feature matrix
+        feat_list = []
+        for seg in segments:
+            sys_p, dia_p, notches = detect_peaks_custom(seg)
+            feat_list.append(extract_features(seg, sys_p, dia_p, notches))
+        feat_matrix = np.vstack(feat_list)
+        # 5. Pad & reshape
+        ts = 2
+        nf = feat_matrix.shape[1]
         if nf % ts:
             p = ts - (nf % ts)
-            feats = np.pad(feats, ((0,0),(0,p)), 'constant')
+            feat_matrix = np.pad(feat_matrix, ((0,0),(0,p)), 'constant')
             nf += p
         fps = nf // ts
-        inp = feats.reshape(-1, ts, fps).astype(np.float32)
+        model_input = feat_matrix.reshape(-1, ts, fps).astype(np.float32)
         # 6. Inference
-        sbp_scaled, dbp_scaled = [], []
-        for s in inp:
-            interpreter.set_tensor(input_details['index'], [s])
+        sbp_scaled = []
+        dbp_scaled = []
+        for sample in model_input:
+            interpreter.set_tensor(input_details['index'], [sample])
             interpreter.invoke()
-            o = interpreter.get_tensor(output_details['index'])[0]
-            sbp_scaled.append(o[0]); dbp_scaled.append(o[1])
+            out = interpreter.get_tensor(output_details['index'])[0]
+            sbp_scaled.append(float(out[0]))
+            dbp_scaled.append(float(out[1]))
         # 7. Inverse scale
         sbp = inverse_sbp(sbp_scaled)
         dbp = inverse_dbp(dbp_scaled)
+        # 8. Return plain Python lists
         return {"SBP": sbp, "DBP": dbp}
 
     except Exception as e:
